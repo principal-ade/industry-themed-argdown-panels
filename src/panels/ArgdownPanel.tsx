@@ -1,7 +1,8 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { GitBranch, Filter, X } from 'lucide-react';
+import { GitBranch, Filter, X, Loader2 } from 'lucide-react';
 import { ThemeProvider, useTheme } from '@principal-ade/industry-theme';
 import { ArgdownRenderer } from '@principal-ade/argdown-renderer';
+import { processArgdown } from '@principal-ade/argdown-parser-browser';
 import type { ArgdownMapData, FilterOptions, NodeMutation } from '@principal-ade/argdown-renderer';
 import type { PanelComponentProps } from '../types';
 
@@ -13,6 +14,8 @@ interface ArgdownPanelState {
   filters: FilterOptions;
   highlightedNode: string | null;
   showFilterPanel: boolean;
+  isLoading: boolean;
+  error: string | null;
 }
 
 const initialState: ArgdownPanelState = {
@@ -21,7 +24,38 @@ const initialState: ArgdownPanelState = {
   filters: {},
   highlightedNode: null,
   showFilterPanel: false,
+  isLoading: false,
+  error: null,
 };
+
+/**
+ * Check if a file path is an argdown file
+ */
+function isArgdownFile(path: string): boolean {
+  const lower = path.toLowerCase();
+  return lower.endsWith('.argdown') || lower.endsWith('.ad');
+}
+
+/**
+ * Check if content looks like argdown syntax
+ */
+function looksLikeArgdown(content: string): boolean {
+  // Check for common argdown patterns:
+  // - Claims in brackets: [Claim text]
+  // - Arguments in angle brackets: <Argument name>
+  // - Support/attack relations: + or -
+  // - Inference indicators: ----
+  const argdownPatterns = [
+    /\[.+\]:/,           // Claim definition
+    /<.+>:/,             // Argument definition
+    /^\s*\+\s*</m,       // Support relation
+    /^\s*-\s*</m,        // Attack relation
+    /^-{3,}$/m,          // Inference line
+    /^\(\d+\)/m,         // Numbered premises
+  ];
+
+  return argdownPatterns.some(pattern => pattern.test(content));
+}
 
 // Type for items with tags
 interface TaggedItem {
@@ -37,11 +71,19 @@ function extractSpeakers(data: ArgdownMapData): string[] {
 
   if (!response) return [];
 
-  // Check tags array
-  if (response.tags) {
+  // Check tags array (might be array or object)
+  if (response.tags && Array.isArray(response.tags)) {
     for (const tag of response.tags) {
-      if (tag.startsWith('speaker-')) {
-        speakers.add(tag.replace('speaker-', ''));
+      const tagStr = typeof tag === 'string' ? tag : tag?.tag || tag?.title || '';
+      if (tagStr.startsWith('speaker-')) {
+        speakers.add(tagStr.replace('speaker-', ''));
+      }
+    }
+  } else if (response.tags && typeof response.tags === 'object') {
+    // Handle object format where keys are tag names
+    for (const tagKey of Object.keys(response.tags)) {
+      if (tagKey.startsWith('speaker-')) {
+        speakers.add(tagKey.replace('speaker-', ''));
       }
     }
   }
@@ -170,12 +212,13 @@ function buildSpeakerMutations(
  * ArgdownPanelContent - Internal component that uses theme
  */
 const ArgdownPanelContent: React.FC<PanelComponentProps> = ({
-  context: _context,
+  context,
   actions: _actions,
   events,
 }) => {
   const [state, setState] = useState<ArgdownPanelState>(initialState);
   const { theme } = useTheme();
+  const hasInitialized = React.useRef(false);
 
   // Handle load argdown event
   const handleLoadArgdown = useCallback((payload: { data: ArgdownMapData; title?: string }) => {
@@ -212,6 +255,53 @@ const ArgdownPanelContent: React.FC<PanelComponentProps> = ({
     }));
   }, []);
 
+  // Handle file selection - parse argdown content from file
+  const handleFileSelected = useCallback(async (payload: { path: string; content?: string }) => {
+    const { path, content } = payload;
+
+    // Skip if no content provided
+    if (!content) {
+      console.log('[ArgdownPanel] file:selected received but no content provided');
+      return;
+    }
+
+    console.log('[ArgdownPanel] Processing content from:', path);
+
+    // Set loading state
+    setState((prev) => ({
+      ...prev,
+      isLoading: true,
+      error: null,
+    }));
+
+    try {
+      // Parse the argdown content
+      const data = await processArgdown(content);
+
+      // Extract title from path
+      const filename = path.split('/').pop() || path;
+      const title = filename.replace(/\.(argdown|ad|md)$/i, '');
+
+      setState((prev) => ({
+        ...prev,
+        data,
+        title,
+        filters: {},
+        isLoading: false,
+        error: null,
+      }));
+
+      console.log('[ArgdownPanel] Successfully parsed argdown content');
+    } catch (error) {
+      console.error('[ArgdownPanel] Failed to parse argdown content:', error);
+      setState((prev) => ({
+        ...prev,
+        isLoading: false,
+        error: error instanceof Error ? error.message : 'Failed to parse argdown content',
+      }));
+    }
+  }, []);
+
   // Subscribe to panel events
   useEffect(() => {
     const unsubscribers = [
@@ -239,10 +329,37 @@ const ArgdownPanelContent: React.FC<PanelComponentProps> = ({
       events.on<{ resetFilters?: boolean }>(`${PANEL_ID}:reset-view`, (event) => {
         handleResetView(event.payload || {});
       }),
+      // Listen for file selection events to auto-parse argdown content
+      events.on<{ path: string; content?: string }>('file:selected', (event) => {
+        if (event.payload) {
+          handleFileSelected(event.payload);
+        }
+      }),
+      events.on<{ path: string; content?: string }>('file:opened', (event) => {
+        if (event.payload) {
+          handleFileSelected(event.payload);
+        }
+      }),
     ];
 
     return () => unsubscribers.forEach((unsub) => unsub());
-  }, [events, handleLoadArgdown, handleSetFilters, handleHighlightNode, handleResetView]);
+  }, [events, handleLoadArgdown, handleSetFilters, handleHighlightNode, handleResetView, handleFileSelected]);
+
+  // Check for existing content in active-file slice on mount
+  useEffect(() => {
+    if (hasInitialized.current || state.data) return;
+    hasInitialized.current = true;
+
+    // Try to get content from the active-file slice
+    const activeFileSlice = context.getSlice?.('active-file');
+    if (activeFileSlice?.data) {
+      const { path, content } = activeFileSlice.data as { path?: string; content?: string };
+      if (path && content) {
+        console.log('[ArgdownPanel] Found existing content in active-file slice:', path);
+        handleFileSelected({ path, content });
+      }
+    }
+  }, [context, handleFileSelected, state.data]);
 
   // Extract available speakers from data
   const availableSpeakers = useMemo(() => {
@@ -416,7 +533,47 @@ const ArgdownPanelContent: React.FC<PanelComponentProps> = ({
 
       {/* Main content area */}
       <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
-        {state.data ? (
+        {state.isLoading ? (
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              height: '100%',
+              color: theme.colors.textMuted,
+              gap: '16px',
+            }}
+          >
+            <Loader2 size={48} strokeWidth={1} className="animate-spin" style={{ animation: 'spin 1s linear infinite' }} />
+            <div style={{ fontSize: theme.fontSizes[3] }}>
+              Parsing Argdown content...
+            </div>
+          </div>
+        ) : state.error ? (
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              height: '100%',
+              color: theme.colors.error || '#ef4444',
+              gap: '16px',
+              padding: '24px',
+            }}
+          >
+            <X size={48} strokeWidth={1} />
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: theme.fontSizes[3], marginBottom: '8px' }}>
+                Failed to parse Argdown
+              </div>
+              <div style={{ fontSize: theme.fontSizes[2], color: theme.colors.textMuted }}>
+                {state.error}
+              </div>
+            </div>
+          </div>
+        ) : state.data ? (
           <ArgdownRenderer
             theme={theme}
             data={state.data}
@@ -444,8 +601,8 @@ const ArgdownPanelContent: React.FC<PanelComponentProps> = ({
                 No Argdown data loaded
               </div>
               <div style={{ fontSize: theme.fontSizes[2] }}>
-                Use the <code style={{ fontFamily: theme.fonts.monospace }}>load_argdown</code> tool
-                to load argument map data
+                Select an <code style={{ fontFamily: theme.fonts.monospace }}>.argdown</code> or <code style={{ fontFamily: theme.fonts.monospace }}>.ad</code> file,
+                or use the <code style={{ fontFamily: theme.fonts.monospace }}>load_argdown</code> tool
               </div>
             </div>
           </div>
