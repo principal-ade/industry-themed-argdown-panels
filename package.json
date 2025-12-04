@@ -1,6 +1,6 @@
 {
   "name": "@industry-theme/argdown-panels",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Argdown argument map visualization panel for the panel framework",
   "type": "module",
   "main": "dist/panels.bundle.js",
