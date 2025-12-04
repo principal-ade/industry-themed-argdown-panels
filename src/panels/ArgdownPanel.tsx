@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { GitBranch, Filter, X, Loader2 } from 'lucide-react';
-import { ThemeProvider, useTheme } from '@principal-ade/industry-theme';
+import { useTheme } from '@principal-ade/industry-theme';
 import { ArgdownRenderer } from '@principal-ade/argdown-renderer';
 import { processArgdown } from '@principal-ade/argdown-parser-browser';
 import type { ArgdownMapData, FilterOptions, NodeMutation } from '@principal-ade/argdown-renderer';
@@ -623,9 +623,5 @@ const ArgdownPanelContent: React.FC<PanelComponentProps> = ({
  * - Node highlighting
  */
 export const ArgdownPanel: React.FC<PanelComponentProps> = (props) => {
-  return (
-    <ThemeProvider>
-      <ArgdownPanelContent {...props} />
-    </ThemeProvider>
-  );
+  return <ArgdownPanelContent {...props} />;
 };
